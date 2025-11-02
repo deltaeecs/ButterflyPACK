@@ -5,7 +5,7 @@
 ######################################################################
 
 # Required version
-cmake_minimum_required(VERSION 3.3 FATAL_ERROR)
+cmake_minimum_required(VERSION 3.21 FATAL_ERROR)
 
 # SET(CMAKE_INSTALL_PREFIX < install_path >)
 
@@ -20,7 +20,12 @@ set(PROJECT_VERSION ${VERSION_MAJOR}.${VERSION_MINOR}.${VERSION_BugFix})
 option(enable_doc       "Build doxygen documentation" OFF)
 option(enable_openmp    "Build with OpenMP support" ON)
 option(enable_toplevel_openmp    "Use OpenMP at top levels of the solver" OFF)
-option(enable_mpi    "Build with MPI support" ON)
+option(enable_mpi    "Build with MPI support" OFF)
+
+if(CMAKE_Fortran_COMPILER_ID MATCHES "GNU")
+    # 关闭参数不匹配和秩不匹配警告
+    set(CMAKE_Fortran_FLAGS "${CMAKE_Fortran_FLAGS} -Wno-argument-mismatch -Wno-rank-mismatch -Wno-conversion")
+endif()
 
 ######################################################################
 #
@@ -402,15 +407,55 @@ if(NOT SED_TOOL)
   message(FATAL_ERROR "Unable to find sed")
 endif()
 
+# ...existing code...
+# Detect sed and platform specifics (支持 Windows + MinGW/MSYS)
+find_program(SED_TOOL NAMES sed)
+if(NOT SED_TOOL)
+  message(FATAL_ERROR "Unable to find 'sed'. On Windows install MSYS2/MinGW and ensure 'sed' is on PATH.")
+endif()
+
+# 可选：检测 bash，因为脚本用到 bash
+find_program(BASH_TOOL NAMES bash)
+if(BASH_TOOL)
+  set(HAVE_BASH TRUE)
+else()
+  set(HAVE_BASH FALSE)
+endif()
+
 if(APPLE)
   # By default assume BSD sed command is used on macOS
   set(USING_MACOS_SED TRUE)
   set(SED_ARG "\"\"") # mac (BSD) sed
 elseif(UNIX)
+  # Linux / GNU sed
   set(USING_MACOS_SED FALSE)
+  set(SED_ARG "")
+elseif(WIN32)
+  message(STATUS "Windows detected - assuming MinGW/MSYS environment")
+  # 在 MSYS2/MinGW 下通常是 GNU sed；尝试探测版本以设置 sed 参数
+  execute_process(
+    COMMAND ${SED_TOOL} --version
+    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+    OUTPUT_VARIABLE SED_TOOL_VERSION
+    ERROR_QUIET
+  )
+  if(SED_TOOL_VERSION MATCHES ".*GNU sed.*")
+    set(USING_MACOS_SED FALSE)
+    set(SED_ARG "")
+  else()
+    # 未检测到 GNU sed，仍然继续但提示用户
+    set(USING_MACOS_SED FALSE)
+    set(SED_ARG "")
+    message(WARNING "sed on Windows does not report GNU sed. It's recommended to run CMake from MSYS2/MinGW shell with GNU sed available.")
+  endif()
+
+  if(NOT HAVE_BASH)
+    message(WARNING "bash not found in PATH. Some preprocessing steps require bash. Install MSYS2 and run CMake from its shell, or add bash to PATH.")
+  endif()
 else()
   message(FATAL_ERROR "The current OS is not yet supported")
 endif()
+# ...existing code...
 
 # Detect version of SED_TOOL version
 message(STATUS "detecting sed version...")
@@ -430,48 +475,68 @@ endif()
 
 message(STATUS "sed command [${SED_TOOL} -i ${SED_ARG}]")
 
+# 检查四个子目录中的CMakeLists.txt是否存在
+set(PRECISION_DIRS
+    SRC_DOUBLE
+    SRC_DOUBLECOMPLEX 
+    SRC_SINGLE
+    SRC_COMPLEX
+)
 
-if(USING_MACOS_SED)
-  execute_process(
-    COMMAND cp PrecisionPreprocessing.sh PrecisionPreprocessing_mac.sh
-    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
-  )
-  execute_process(
-    COMMAND ${SED_TOOL} -i ${SED_ARG} -e "s/sed -i/sed -i \"\"/g" PrecisionPreprocessing_mac.sh
-    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
-  )
-  execute_process(
-    COMMAND ${SED_TOOL} -i ${SED_ARG} -e "s/eval//g" PrecisionPreprocessing_mac.sh
-    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
-  )
-  execute_process(
-    COMMAND ${SED_TOOL} -i ${SED_ARG} -e "/\r\"/d" PrecisionPreprocessing_mac.sh
-    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
-  )
-  execute_process(
-    COMMAND ${SED_TOOL} -i ${SED_ARG} -e "s/lb=.*/lb=\"[[:<:]]\"/g" PrecisionPreprocessing_mac.sh
-    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
-  )
-  execute_process(
-    COMMAND ${SED_TOOL} -i ${SED_ARG} -e "s/rb=.*/rb=\"[[:>:]]\"/g" PrecisionPreprocessing_mac.sh
-    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
-  )
-  execute_process(
-    COMMAND bash PrecisionPreprocessing_mac.sh ${enable_doc}
-    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
-  )
-  set(PREPROC_EXPORT "PrecisionPreprocessing_mac.sh")
+set(MISSING_CMAKE_LISTS FALSE)
+
+foreach(dir IN LISTS PRECISION_DIRS)
+    if(NOT EXISTS "${ButterflyPACK_SOURCE_DIR}/${dir}/CMakeLists.txt")
+        set(MISSING_CMAKE_LISTS TRUE)
+        message(STATUS "CMakeLists.txt missing in ${dir}")
+    endif()
+endforeach()
+
+# 如果有任意一个CMakeLists.txt不存在，则执行预处理脚本
+if(MISSING_CMAKE_LISTS)
+    if(USING_MACOS_SED)
+        execute_process(
+            COMMAND cp PrecisionPreprocessing.sh PrecisionPreprocessing_mac.sh
+            WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+        )
+        execute_process(
+            COMMAND ${SED_TOOL} -i ${SED_ARG} -e "s/sed -i/sed -i \"\"/g" PrecisionPreprocessing_mac.sh
+            WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+        )
+        execute_process(
+            COMMAND ${SED_TOOL} -i ${SED_ARG} -e "s/eval//g" PrecisionPreprocessing_mac.sh
+            WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+        )
+        execute_process(
+            COMMAND ${SED_TOOL} -i ${SED_ARG} -e "/\r\"/d" PrecisionPreprocessing_mac.sh
+            WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+        )
+        execute_process(
+            COMMAND ${SED_TOOL} -i ${SED_ARG} -e "s/lb=.*/lb=\"[[:<:]]\"/g" PrecisionPreprocessing_mac.sh
+            WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+        )
+        execute_process(
+            COMMAND ${SED_TOOL} -i ${SED_ARG} -e "s/rb=.*/rb=\"[[:>:]]\"/g" PrecisionPreprocessing_mac.sh
+            WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+        )
+        execute_process(
+            COMMAND bash PrecisionPreprocessing_mac.sh ${enable_doc}
+            WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+        )
+        set(PREPROC_EXPORT "PrecisionPreprocessing_mac.sh")
+    else()
+        execute_process(
+            COMMAND bash PrecisionPreprocessing.sh ${enable_doc}
+            WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
+        )
+        set(PREPROC_EXPORT "PrecisionPreprocessing.sh")
+    endif()
 else()
-  execute_process(
-    COMMAND bash PrecisionPreprocessing.sh ${enable_doc}
-    WORKING_DIRECTORY ${ButterflyPACK_SOURCE_DIR}
-  )
-  set(PREPROC_EXPORT "PrecisionPreprocessing.sh")
+    message(STATUS "All precision directory CMakeLists.txt files exist, skipping preprocessing")
 endif()
 
-
 if(NOT enable_mpi)
-add_subdirectory(MPI_DUMMY)
+    add_subdirectory(MPI_DUMMY)
 endif()
 add_subdirectory(SRC_DOUBLE)
 add_subdirectory(SRC_DOUBLECOMPLEX)
